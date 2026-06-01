@@ -1,0 +1,288 @@
+import streamlit as st
+import fitz
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+import io
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+
+st.set_page_config(
+    page_title="AI 발표 코칭 시스템",
+    page_icon="🎤",
+    layout="wide"
+)
+
+st.markdown("""
+<style>
+.title-box {
+    padding: 28px;
+    border-radius: 20px;
+    background: linear-gradient(135deg, #eef2ff, #f8fafc);
+    border: 1px solid #e5e7eb;
+    margin-bottom: 25px;
+}
+.big-title {
+    font-size: 42px;
+    font-weight: 800;
+    color: #1f2937;
+}
+.sub-title {
+    font-size: 18px;
+    color: #4b5563;
+    margin-top: 10px;
+}
+.card {
+    padding: 22px;
+    border-radius: 16px;
+    background-color: white;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0px 4px 12px rgba(0,0,0,0.05);
+    margin-bottom: 18px;
+}
+.score {
+    font-size: 38px;
+    font-weight: 800;
+    color: #2563eb;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="title-box">
+    <div class="big-title">🎤 AI 발표자료 + 발표자 분석 시스템</div>
+    <div class="sub-title">
+    PDF 발표자료와 발표자의 웹캠 이미지를 분석하여 발표 완성도를 평가합니다.
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+def calculate_ppt_score(text_count, image_count):
+    score = 100
+
+    if text_count > 800:
+        score -= 40
+    elif text_count > 500:
+        score -= 25
+    elif text_count > 300:
+        score -= 10
+
+    if image_count == 0:
+        score -= 15
+    elif image_count >= 3:
+        score += 5
+
+    return max(0, min(100, score))
+
+
+def analyze_presenter(image_file):
+    if not CV2_AVAILABLE:
+        return None, "OpenCV가 설치되지 않았습니다."
+
+    image = Image.open(image_file)
+    img_array = np.array(image)
+
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+    face_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    eye_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_eye.xml"
+    )
+    smile_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_smile.xml"
+    )
+
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+    score = 40
+    feedback = []
+
+    if len(faces) == 0:
+        feedback.append("얼굴이 감지되지 않았습니다. 카메라를 정면으로 바라보세요.")
+        return {
+            "score": 30,
+            "face_detected": False,
+            "eye_detected": False,
+            "smile_detected": False,
+            "centered": False,
+            "feedback": feedback
+        }, None
+
+    x, y, w, h = faces[0]
+    score += 20
+    feedback.append("얼굴이 정상적으로 감지되었습니다.")
+
+    img_h, img_w = gray.shape
+    face_center_x = x + w / 2
+    screen_center_x = img_w / 2
+
+    centered = abs(face_center_x - screen_center_x) < img_w * 0.18
+
+    if centered:
+        score += 15
+        feedback.append("발표자가 화면 중앙에 위치해 있습니다.")
+    else:
+        feedback.append("발표자가 화면 중앙에서 벗어나 있습니다.")
+
+    roi_gray = gray[y:y+h, x:x+w]
+
+    eyes = eye_cascade.detectMultiScale(roi_gray)
+    eye_detected = len(eyes) >= 1
+
+    if eye_detected:
+        score += 15
+        feedback.append("눈이 감지되어 시선 처리가 양호한 것으로 판단됩니다.")
+    else:
+        feedback.append("눈 감지가 약합니다. 카메라를 정면으로 바라보는 것이 좋습니다.")
+
+    smiles = smile_cascade.detectMultiScale(roi_gray, 1.7, 20)
+    smile_detected = len(smiles) > 0
+
+    if smile_detected:
+        score += 10
+        feedback.append("웃는 표정이 감지되었습니다. 발표 인상이 긍정적입니다.")
+    else:
+        feedback.append("표정 변화가 적습니다. 자연스러운 표정을 유지하면 좋습니다.")
+
+    score = max(0, min(100, score))
+
+    return {
+        "score": score,
+        "face_detected": True,
+        "eye_detected": eye_detected,
+        "smile_detected": smile_detected,
+        "centered": centered,
+        "feedback": feedback
+    }, None
+
+
+ppt_score = None
+presenter_score = None
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("📄 발표자료 분석")
+    uploaded_file = st.file_uploader("PDF 발표자료를 업로드하세요", type=["pdf"])
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col_right:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("📷 발표자 분석")
+    camera_image = st.camera_input("발표자 사진을 촬영하세요")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+if uploaded_file is not None:
+    pdf = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+
+    slide_scores = []
+    slide_data = []
+
+    for page_num in range(len(pdf)):
+        page = pdf[page_num]
+        text_count = len(page.get_text())
+        image_count = len(page.get_images(full=True))
+        score = calculate_ppt_score(text_count, image_count)
+        slide_scores.append(score)
+
+        if score >= 70:
+            danger = "양호"
+        elif score >= 40:
+            danger = "주의"
+        else:
+            danger = "위험"
+
+        slide_data.append([page_num + 1, text_count, image_count, score, danger])
+
+    ppt_score = int(np.mean(slide_scores))
+    worst_slide = slide_scores.index(min(slide_scores)) + 1
+
+    st.subheader("📊 슬라이드별 분석 결과")
+
+    for page, text_count, image_count, score, danger in slide_data:
+        st.markdown(f"""
+        <div class="card">
+            <h3>슬라이드 {page}</h3>
+            <p>글자 수: {text_count}</p>
+            <p>이미지 개수: {image_count}</p>
+            <p>생존 가능성: <b>{score}%</b></p>
+            <p>위험도: <b>{danger}</b></p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.subheader("📈 슬라이드별 생존 가능성 그래프")
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(range(1, len(slide_scores) + 1), slide_scores, marker="o")
+    ax.set_xlabel("Slide Number")
+    ax.set_ylabel("Survival Score")
+    ax.set_ylim(0, 100)
+    ax.grid(True)
+    st.pyplot(fig)
+
+    st.markdown(f"""
+    <div class="card">
+        <h3>발표자료 최종 결과</h3>
+        <p>평균 생존 가능성</p>
+        <div class="score">{ppt_score}%</div>
+        <p>가장 위험한 슬라이드: <b>{worst_slide}페이지</b></p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+if camera_image is not None:
+    result, error = analyze_presenter(camera_image)
+
+    st.subheader("🧑 발표자 분석 결과")
+
+    if error:
+        st.error(error)
+    else:
+        presenter_score = result["score"]
+
+        st.markdown(f"""
+        <div class="card">
+            <h3>발표자 점수</h3>
+            <div class="score">{presenter_score}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for fb in result["feedback"]:
+            st.write("• " + fb)
+
+
+if ppt_score is not None and presenter_score is not None:
+    final_score = int(ppt_score * 0.6 + presenter_score * 0.4)
+
+    st.header("🏁 종합 발표 평가")
+
+    st.markdown(f"""
+    <div class="card">
+        <p>발표자료 점수: <b>{ppt_score}%</b></p>
+        <p>발표자 점수: <b>{presenter_score}%</b></p>
+        <p>최종 발표 완성도</p>
+        <div class="score">{final_score}%</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("💡 종합 피드백")
+
+    if final_score >= 80:
+        st.success("발표자료와 발표자 상태가 모두 우수합니다.")
+    elif final_score >= 60:
+        st.warning("전체적으로 양호하지만 일부 슬라이드 구성 또는 발표 자세 개선이 필요합니다.")
+    else:
+        st.error("발표자료와 발표자 상태 모두 개선이 필요합니다.")
+
+elif ppt_score is None or presenter_score is None:
+    st.info("PDF 발표자료와 발표자 사진을 모두 입력하면 종합 평가가 출력됩니다.")
