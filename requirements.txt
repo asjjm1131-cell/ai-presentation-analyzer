@@ -1,1 +1,6 @@
 streamlit
+PyMuPDF
+matplotlib
+numpy
+pillow
+opencv-python-headless
